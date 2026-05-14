@@ -1,0 +1,8 @@
+# Never commit credentials
+winrm_hosts.json
+.env
+*.pyc
+__pycache__/
+*.egg-info/
+.venv/
+venv/

@@ -1,0 +1,21 @@
+{
+  "_note": "Local file — DO NOT add to git repo. Run: chmod 600 winrm_hosts.json",
+  "hosts": {
+    "my-windows-pc": {
+      "endpoint": "https://192.168.1.100:5986/wsman",
+      "username": "administrator",
+      "password": "your-password-here",
+      "transport": "basic",
+      "server_cert_validation": "ignore",
+      "message_encryption": "never"
+    },
+    "office-server": {
+      "endpoint": "https://10.0.0.50:5986/wsman",
+      "username": "admin",
+      "password": "your-password-here",
+      "transport": "basic",
+      "server_cert_validation": "ignore",
+      "message_encryption": "never"
+    }
+  }
+}

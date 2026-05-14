@@ -1,0 +1,34 @@
+{
+  "mcpServers": {
+    "harper-obsidian": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["/path/to/harper-mcps/mcp_obsidian_server.py"],
+      "env": {
+        "OBSIDIAN_VAULT": "/home/youruser/Obsidian"
+      }
+    },
+    "harper-ssh": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["/path/to/harper-mcps/mcp_ssh_server.py"],
+      "env": {}
+    },
+    "harper-winrm": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["/path/to/harper-mcps/mcp_winrm_server.py"],
+      "env": {
+        "WINRM_HOSTS_CONFIG": "/home/youruser/.claude/winrm_hosts.json"
+      }
+    },
+    "harper-osint": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["/path/to/harper-mcps/mcp_osint_server.py"],
+      "env": {
+        "OSINT_VAULT": "/home/youruser/osint-reports"
+      }
+    }
+  }
+}
