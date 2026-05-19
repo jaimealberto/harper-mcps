@@ -1,69 +1,74 @@
 # harper-mcps
 
-A collection of MCP (Model Context Protocol) servers for [Claude Code](https://claude.ai/code) to manage infrastructure, access Obsidian vaults, administer Windows machines, and perform OSINT research.
+> [English version](README.en.md)
 
-Built for a self-hosted homelab. All servers use stdio transport without FastMCP for fast startup (<20ms).
+Colección de servidores MCP (_Model Context Protocol_) para [Claude Code](https://claude.ai/code) que permiten gestionar infraestructura, acceder a vaults de Obsidian, administrar máquinas Windows y realizar investigación OSINT.
 
-## Servers
+Diseñados para un homelab autogestionado. Todos los servidores usan transporte stdio sin FastMCP para un arranque rápido (<20ms).
 
-| Server | Tools | Dependencies |
-|--------|-------|--------------|
+## Servidores incluidos
+
+| Servidor | Herramientas | Dependencias |
+|----------|-------------|--------------|
 | `mcp_obsidian_server.py` | search, read, write, list, tags, backlinks, structure | `mcp` |
-| `mcp_ssh_server.py` | ssh_run, ssh_read/write_file, ssh_check, nmap_discover/scan/audit | `nmap` (system) |
+| `mcp_ssh_server.py` | ssh_run, ssh_read/write_file, ssh_check, nmap_discover/scan/audit | `nmap` (sistema) |
 | `mcp_winrm_server.py` | winrm_run_ps, winrm_read/write_file, winrm_install, winrm_check | `pywinrm` |
-| `mcp_osint_server.py` | username, email, social, domain, whois, dns, phone, ip, breach, dossier | see below |
+| `mcp_osint_server.py` | username, email, social, domain, whois, dns, phone, ip, breach, dossier | ver más abajo |
 
 ---
 
-## Quick setup
+## Instalación rápida
 
-### 1. Clone the repo
+### 1. Clonar el repositorio
 
 ```bash
 git clone https://github.com/JaimeAlberto/harper-mcps.git
 cd harper-mcps
 ```
 
-### 2. Install dependencies
+### 2. Instalar dependencias
 
-**Obsidian MCP:**
+**MCP Obsidian:**
 ```bash
 pip install mcp
 ```
 
-**SSH + nmap MCP:**
+**MCP SSH + nmap:**
 ```bash
-# No Python deps — uses system ssh and nmap
-sudo apt install nmap   # or brew install nmap
+# Sin dependencias Python — usa ssh y nmap del sistema
+sudo apt install nmap        # Debian/Ubuntu
+# brew install nmap          # macOS
 ```
 
-**WinRM MCP:**
+**MCP WinRM:**
 ```bash
 pip install pywinrm urllib3
 ```
 
-**OSINT MCP:**
+**MCP OSINT:**
 ```bash
+# Librerías base (obligatorias):
 pip install python-whois dnspython phonenumbers
-# Optional (for deeper searches):
+
+# Herramientas opcionales (para búsquedas más profundas):
 pip install maigret holehe sherlock-project theHarvester
 ```
 
-### 3. Configure
+### 3. Configurar
 
-Copy the example files:
+Copia los ficheros de ejemplo:
 ```bash
 cp .env.example .env
-# Edit .env with your paths
+# Edita .env con tus rutas
 
 cp winrm_hosts.example.json ~/.claude/winrm_hosts.json
 chmod 600 ~/.claude/winrm_hosts.json
-# Edit with your Windows hosts and credentials
+# Edita con tus hosts Windows y credenciales
 ```
 
-### 4. Add to Claude Code
+### 4. Añadir a Claude Code
 
-Add to `~/.claude.json` under `mcpServers` (or use `claude mcp add`):
+Añade a `~/.claude.json` bajo la clave `mcpServers` (o usa `claude mcp add`):
 
 ```json
 {
@@ -71,75 +76,109 @@ Add to `~/.claude.json` under `mcpServers` (or use `claude mcp add`):
     "harper-obsidian": {
       "type": "stdio",
       "command": "python3",
-      "args": ["/path/to/harper-mcps/mcp_obsidian_server.py"],
+      "args": ["/ruta/a/harper-mcps/mcp_obsidian_server.py"],
       "env": {
-        "OBSIDIAN_VAULT": "/home/youruser/Obsidian"
+        "OBSIDIAN_VAULT": "/home/tuusuario/Obsidian"
       }
     }
   }
 }
 ```
 
-See `claude_settings_example.json` for all four servers.
+Consulta `claude_settings_example.json` para ver la configuración de los cuatro servidores a la vez.
 
 ---
 
-## Server details
+## Detalle de cada servidor
 
-### Obsidian MCP (`harper-obsidian`)
+### MCP Obsidian (`harper-obsidian`)
 
-Gives Claude Code direct access to your [Obsidian](https://obsidian.md) vault.
+Permite a Claude Code leer y escribir directamente en tu vault de [Obsidian](https://obsidian.md).
 
-**Environment variables:**
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OBSIDIAN_VAULT` | `~/Obsidian` | Path to your vault |
+📄 [Documentación completa → docs/obsidian.md](docs/obsidian.md)
 
-**Example usage:**
-- "Search my vault for notes about Python"
-- "Read the note at Projects/my-project.md"
-- "List all notes tagged #todo"
-- "Show me all backlinks to the weekly-review note"
+**Variables de entorno:**
 
----
+| Variable | Valor por defecto | Descripción |
+|----------|-------------------|-------------|
+| `OBSIDIAN_VAULT` | `~/Obsidian` | Ruta al vault |
 
-### SSH + nmap MCP (`harper-ssh`)
+**Herramientas disponibles:**
 
-Run commands on remote Linux/Unix hosts via SSH and scan networks with nmap.
-Reads host configuration from `~/.ssh/config` — no credentials stored anywhere.
+| Herramienta | Descripción |
+|-------------|-------------|
+| `search_vault` | Busca texto en todas las notas con fragmento de contexto |
+| `read_note` | Lee una nota por ruta relativa al vault |
+| `write_note` | Escribe o sobreescribe una nota |
+| `list_notes` | Lista notas de un directorio (recursivo) |
+| `find_by_tag` | Encuentra notas por tag en frontmatter o cuerpo |
+| `get_backlinks` | Encuentra notas que enlazan a una nota concreta |
+| `vault_structure` | Estructura de carpetas con conteo de notas |
 
-**Features:**
-- Auto-backup before writing files (creates `file.harper.YYYY-MM-DD`)
-- Detects write operations and backs up the target file automatically
-- nmap ping scan, port scan and full service audit
-
-**Example usage:**
-- "List my SSH hosts"
-- "Run `df -h` on server01"
-- "Scan ports 22,80,443 on 192.168.1.0/24"
-- "Check which hosts in my network are online"
+**Ejemplos de uso:**
+- "Busca en mi vault notas sobre Python"
+- "Lee la nota Proyectos/mi-proyecto.md"
+- "Lista todas las notas con el tag #pendiente"
+- "¿Qué notas enlazan a la nota weekly-review?"
 
 ---
 
-### WinRM MCP (`harper-winrm`)
+### MCP SSH + nmap (`harper-ssh`)
 
-Administer Windows machines remotely via WinRM (Windows Remote Management).
+Ejecuta comandos en hosts Linux/Unix remotos via SSH y escanea redes con nmap.
+Lee la configuración de hosts desde `~/.ssh/config` — sin contraseñas almacenadas.
 
-**Requirements on the Windows side:**
+📄 [Documentación completa → docs/ssh.md](docs/ssh.md)
+
+**Características destacadas:**
+- Backup automático antes de escribir ficheros (crea `fichero.harper.YYYY-MM-DD`)
+- Detecta operaciones de escritura en el comando y hace backup del fichero destino
+- Ping scan, escaneo de puertos y auditoría completa de servicios con nmap
+
+**Herramientas disponibles:**
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `ssh_list_hosts` | Lista hosts del `~/.ssh/config` con IP y usuario |
+| `ssh_run` | Ejecuta un comando en un host remoto |
+| `ssh_read_file` | Lee el contenido de un fichero remoto |
+| `ssh_write_file` | Escribe un fichero remoto (con backup automático) |
+| `ssh_check` | Comprueba conectividad SSH con un host |
+| `ssh_check_all` | Comprueba todos los hosts a la vez |
+| `nmap_discover` | Ping scan: detecta hosts activos en una red |
+| `nmap_scan` | Escaneo de puertos en uno o varios hosts |
+| `nmap_audit` | Auditoría completa: versiones de servicios + scripts NSE |
+
+**Ejemplos de uso:**
+- "Lista mis hosts SSH"
+- "Ejecuta `df -h` en servidor01"
+- "Escanea los puertos 22,80,443 en 192.168.1.0/24"
+- "¿Qué hosts están activos en mi red?"
+
+---
+
+### MCP WinRM (`harper-winrm`)
+
+Administra máquinas Windows de forma remota via WinRM (Windows Remote Management).
+
+📄 [Documentación completa → docs/winrm.md](docs/winrm.md)
+
+**Requisitos en el lado Windows** (ejecutar como Administrador):
 ```powershell
-# Run as Administrator on the Windows machine:
 Enable-PSRemoting -Force
-winrm set winrm/config/listener?Address=*+Transport=HTTPS @{Port="5986"; CertificateThumbprint="YOUR_CERT_THUMBPRINT"}
+# Para HTTPS (recomendado):
+New-SelfSignedCertificate -DnsName "NOMBRE_PC" -CertStoreLocation Cert:\LocalMachine\My
+winrm create winrm/config/Listener?Address=*+Transport=HTTPS @{Port="5986";CertificateThumbprint="THUMBPRINT"}
 ```
 
-**Credentials file** (`~/.claude/winrm_hosts.json`, chmod 600):
+**Fichero de credenciales** (`~/.claude/winrm_hosts.json`, chmod 600):
 ```json
 {
   "hosts": {
-    "my-pc": {
+    "mi-pc": {
       "endpoint": "https://192.168.1.100:5986/wsman",
-      "username": "administrator",
-      "password": "your-password",
+      "username": "administrador",
+      "password": "tu-contraseña",
       "transport": "basic",
       "server_cert_validation": "ignore",
       "message_encryption": "never"
@@ -148,63 +187,80 @@ winrm set winrm/config/listener?Address=*+Transport=HTTPS @{Port="5986"; Certifi
 }
 ```
 
-**Environment variables:**
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WINRM_HOSTS_CONFIG` | `~/.claude/winrm_hosts.json` | Path to credentials file |
+**Variables de entorno:**
 
-**Example usage:**
-- "Check if my-pc is reachable"
-- "Run `winget upgrade` on my-pc and show pending updates"
-- "Install Mozilla.Firefox on my-pc via winget"
-- "Read C:\Users\user\AppData\Local\app\config.ini from my-pc"
+| Variable | Valor por defecto | Descripción |
+|----------|-------------------|-------------|
+| `WINRM_HOSTS_CONFIG` | `~/.claude/winrm_hosts.json` | Ruta al fichero de credenciales |
 
----
+**Herramientas disponibles:**
 
-### OSINT MCP (`harper-osint`)
+| Herramienta | Descripción |
+|-------------|-------------|
+| `winrm_list_hosts` | Lista hosts configurados y estado de credenciales |
+| `winrm_run_ps` | Ejecuta un script PowerShell en el host Windows |
+| `winrm_read_file` | Lee el contenido de un fichero Windows |
+| `winrm_write_file` | Escribe un fichero Windows (con backup automático) |
+| `winrm_install` | Instala software via winget |
+| `winrm_check` | Comprueba conectividad WinRM |
 
-OSINT research tools integrated into Claude Code. Wraps maigret, holehe, sherlock, theHarvester and standard libraries.
-
-**Environment variables:**
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OSINT_VAULT` | `~/osint-reports` | Directory to save reports |
-| `THEHARVESTER_BIN` | auto-detect | Path to theHarvester binary |
-
-**Tool overview:**
-
-| Tool | What it does | Requires |
-|------|-------------|----------|
-| `osint_status` | Check installed tools | — |
-| `osint_username` | Username on 3000+ sites (Maigret) | `pip install maigret` |
-| `osint_email` | Email on 120+ services (Holehe) | `pip install holehe` |
-| `osint_social_scan` | Username on 400+ socials (Sherlock) | `pip install sherlock-project` |
-| `osint_domain` | Emails/subdomains/IPs (TheHarvester) | `pip install theHarvester` |
-| `osint_whois` | WHOIS for domain or IP | `pip install python-whois` |
-| `osint_dns` | Full DNS + SPF/DMARC/DKIM check | `pip install dnspython` |
-| `osint_phone` | Country/operator/type for a number | `pip install phonenumbers` |
-| `osint_ip` | ASN/geo/abuse for a public IP | — (uses ipinfo.io) |
-| `osint_breach_check` | Email in HIBP data breaches | — (API key optional) |
-| `osint_dossier` | Full report combining all tools | depends on target type |
-
-**Example usage:**
-- "Check osint_status to see what's installed"
-- "Run osint_whois on example.com"
-- "Do a full DNS analysis of company.com"
-- "Check if john@example.com appears in data breaches"
-- "Generate a full dossier on the domain competitor.com"
+**Ejemplos de uso:**
+- "¿Está encendido mi-pc?"
+- "Ejecuta `winget upgrade` en mi-pc y muéstrame las actualizaciones pendientes"
+- "Instala Mozilla.Firefox en mi-pc via winget"
+- "Lee el fichero C:\Users\usuario\AppData\Local\app\config.ini de mi-pc"
 
 ---
 
-## Security notes
+### MCP OSINT (`harper-osint`)
 
-- **SSH MCP:** No credentials stored — relies entirely on `~/.ssh/config` and SSH keys.
-- **WinRM MCP:** Credentials stored in `winrm_hosts.json` outside the repo. Keep it `chmod 600` and never commit it.
-- **OSINT MCP:** All tools make outbound network requests. Be aware of rate limits and terms of service.
-- **nmap:** Some scan types require root. The servers use `-sT` (TCP connect) which works without root.
+Herramientas de inteligencia de fuentes abiertas integradas en Claude Code. Envuelve maigret, holehe, sherlock, theHarvester y librerías estándar.
+
+📄 [Documentación completa → docs/osint.md](docs/osint.md)
+
+> ⚠️ **Aviso legal:** Usa estas herramientas solo sobre objetivos para los que tengas autorización. El uso sobre terceros sin consentimiento puede ser ilegal en tu país.
+
+**Variables de entorno:**
+
+| Variable | Valor por defecto | Descripción |
+|----------|-------------------|-------------|
+| `OSINT_VAULT` | `~/osint-reports` | Directorio donde guardar los informes |
+| `THEHARVESTER_BIN` | auto-detect | Ruta al binario de theHarvester |
+
+**Herramientas disponibles:**
+
+| Herramienta | Qué hace | Requiere |
+|-------------|---------|----------|
+| `osint_status` | Comprueba herramientas instaladas | — |
+| `osint_username` | Username en 3000+ sitios (Maigret) | `pip install maigret` |
+| `osint_email` | Email en 120+ servicios (Holehe) | `pip install holehe` |
+| `osint_social_scan` | Username en 400+ redes (Sherlock) | `pip install sherlock-project` |
+| `osint_domain` | Emails/subdominios/IPs (TheHarvester) | `pip install theHarvester` |
+| `osint_whois` | WHOIS de dominio o IP | `pip install python-whois` |
+| `osint_dns` | DNS completo + SPF/DMARC/DKIM | `pip install dnspython` |
+| `osint_phone` | País/operador/tipo de un teléfono | `pip install phonenumbers` |
+| `osint_ip` | ASN/geo/abuse de una IP pública | — (usa ipinfo.io) |
+| `osint_breach_check` | Email en brechas HIBP | — (API key opcional) |
+| `osint_dossier` | Informe completo combinando todas las tools | según tipo de objetivo |
+
+**Ejemplos de uso:**
+- "Comprueba el estado de las herramientas OSINT instaladas"
+- "Haz un WHOIS de ejemplo.com"
+- "Analiza el DNS de empresa.com y dime si tiene SPF y DMARC"
+- "¿Aparece usuario@ejemplo.com en alguna brecha de datos?"
+- "Genera un dossier completo sobre el dominio empresa.com"
 
 ---
 
-## License
+## Notas de seguridad
 
-MIT. Use at your own risk. These tools make real network connections and can affect remote systems.
+- **MCP SSH:** Sin credenciales almacenadas — usa `~/.ssh/config` y claves SSH.
+- **MCP WinRM:** Credenciales en `winrm_hosts.json` fuera del repo. Mantener `chmod 600` y nunca hacer commit.
+- **MCP OSINT:** Todas las herramientas hacen peticiones de red. Respeta los límites de uso y términos de servicio de cada plataforma.
+- **nmap:** Algunos tipos de escaneo requieren root. Los servidores usan `-sT` (TCP connect) que no necesita privilegios.
+
+---
+
+## Licencia
+
+MIT. Úsalos bajo tu propia responsabilidad. Estas herramientas realizan conexiones de red reales y pueden modificar sistemas remotos.
