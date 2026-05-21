@@ -18,6 +18,7 @@ Tools:
   osint_ip            — ASN/org/geo/abuse for an IP address
   osint_breach_check  — HaveIBeenPwned: email in known breaches
   osint_dossier       — full dossier on a target (saves to OSINT_VAULT)
+  osint_person        — comprehensive person profile: Maigret+Sherlock+Holehe → Markdown report
 
 MCP over stdio without FastMCP (startup <20ms).
 """
@@ -604,6 +605,229 @@ def tool_osint_dossier(args: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Tool: osint_person
+# ─────────────────────────────────────────────────────────────────────────────
+
+def tool_osint_person(args: dict) -> str:
+    """
+    Comprehensive person OSINT profile.
+    Runs Sherlock + Maigret for each username hint, Holehe for email.
+    Generates a structured Markdown report with digital footprint and psych profile skeleton.
+    """
+    name           = args["name"]
+    username_hints = args.get("username_hints", [])
+    email          = args.get("email")
+    save           = args.get("save", True)
+
+    ts   = datetime.now().strftime("%Y-%m-%d %H:%M")
+    slug = "".join(c if c.isalnum() else "_" for c in name.lower()).strip("_")
+    filename = f"{datetime.now().strftime('%Y-%m-%d')}_person_{slug}.md"
+
+    sherlock_results: dict = {}   # username -> list of "[+] URL" lines
+    maigret_results:  dict = {}   # username -> list of (site, url) tuples
+    holehe_result          = ""
+    tool_warnings          = []
+
+    # 1. Sherlock — búsqueda rápida por username
+    for uname in username_hints:
+        if _has("sherlock"):
+            rc, stdout, _ = _run(
+                "sherlock", uname,
+                "--print-found", "--no-color",
+                "--timeout", "10",
+                timeout=TIMEOUT_FAST,
+            )
+            sherlock_results[uname] = [l.strip() for l in stdout.splitlines() if "[+]" in l]
+        else:
+            sherlock_results[uname] = []
+            if "sherlock" not in " ".join(tool_warnings):
+                tool_warnings.append("sherlock no instalado — búsqueda rápida omitida")
+
+    # 2. Maigret — búsqueda extendida por username (3000+ sitios)
+    for uname in username_hints:
+        if _has("maigret"):
+            json_out = VAULT_OSINT / f"report_{uname}_simple.json"
+            rc, stdout, stderr = _run(
+                "maigret", uname,
+                "--top-sites", "500",
+                "--no-color", "--no-progressbar",
+                "--json", "simple",
+                "--folderoutput", str(VAULT_OSINT),
+                timeout=TIMEOUT_MEDIUM,
+            )
+            if json_out.exists():
+                try:
+                    data = json.loads(json_out.read_text())
+                    found = []
+                    for site, info in data.items():
+                        if not isinstance(info, dict):
+                            continue
+                        status = info.get("status", {})
+                        msg = status.get("message", "") if isinstance(status, dict) else str(status)
+                        if msg in ("Claimed", "Found"):
+                            url = info.get("url_user", info.get("url", ""))
+                            found.append((site, url))
+                    maigret_results[uname] = found
+                except Exception as e:
+                    maigret_results[uname] = []
+                    tool_warnings.append(f"Error parseando JSON de Maigret para @{uname}: {e}")
+            else:
+                # Fallback: parsear stdout si no se generó JSON
+                found = []
+                for line in (stdout + stderr).splitlines():
+                    if "[+]" in line:
+                        parts = line.strip().split()
+                        url = parts[-1] if parts else ""
+                        site = parts[1] if len(parts) > 1 else url
+                        found.append((site, url))
+                maigret_results[uname] = found
+        else:
+            maigret_results[uname] = []
+            if "maigret" not in " ".join(tool_warnings):
+                tool_warnings.append("maigret no instalado — búsqueda extendida omitida")
+
+    # 3. Holehe — búsqueda por email
+    if email:
+        if _has("holehe"):
+            rc, stdout, stderr = _run(
+                "holehe", email, "--no-color", "--only-used",
+                timeout=TIMEOUT_MEDIUM,
+            )
+            holehe_result = (stdout + stderr).strip()
+        else:
+            holehe_result = ""
+            tool_warnings.append("holehe no instalado — búsqueda por email omitida")
+
+    # Calcular nivel de privacidad digital
+    total_platforms = sum(len(v) for v in maigret_results.values())
+    if total_platforms == 0:
+        privacy_level = "Alto (huella mínima detectada)"
+    elif total_platforms <= 10:
+        privacy_level = "Medio-Alto"
+    elif total_platforms <= 25:
+        privacy_level = "Medio"
+    elif total_platforms <= 50:
+        privacy_level = "Medio-Bajo"
+    else:
+        privacy_level = "Bajo (presencia extensa en internet)"
+
+    # Combinar plataformas de todos los usernames (Maigret)
+    all_platforms: dict = {}  # plataforma -> url
+    for sites in maigret_results.values():
+        for site, url in sites:
+            if site not in all_platforms:
+                all_platforms[site] = url
+
+    # ── Construir informe Markdown ────────────────────────────────────────────
+    lines = [
+        f"# Perfil OSINT: {name}",
+        f"**Fecha:** {ts}  |  **Generado por:** harper-osint",
+        "",
+        "---",
+        "",
+        "## Datos de entrada",
+        f"- **Nombre completo:** {name}",
+    ]
+    if username_hints:
+        lines.append(f"- **Usernames investigados:** {', '.join('@' + u for u in username_hints)}")
+    if email:
+        lines.append(f"- **Email:** {email}")
+    lines += ["", "---", ""]
+
+    # Huella digital — tabla de plataformas (Maigret)
+    lines += [
+        "## Huella digital — plataformas encontradas",
+        "",
+        "> ⚠️ Verificar manualmente que cada perfil pertenece a la persona investigada.",
+        "",
+    ]
+    if all_platforms:
+        lines += [
+            f"**Total plataformas (Maigret):** {len(all_platforms)}  |  **Nivel de privacidad:** {privacy_level}",
+            "",
+            "| Plataforma | URL | Verificado |",
+            "|---|---|---|",
+        ]
+        for site, url in sorted(all_platforms.items()):
+            lines.append(f"| {site} | {url} | ⬜ Pendiente |")
+    else:
+        lines.append(f"*No se encontraron perfiles en búsqueda extendida (Maigret).  |  Nivel de privacidad: {privacy_level}*")
+    lines.append("")
+
+    # Sherlock — resultados rápidos
+    if username_hints:
+        lines += ["### Búsqueda rápida — Sherlock", ""]
+        for uname, found_lines in sherlock_results.items():
+            lines.append(f"**@{uname}** — {len(found_lines)} resultado(s):")
+            for fl in found_lines[:40]:
+                lines.append(f"  {fl}")
+            if len(found_lines) > 40:
+                lines.append(f"  ... y {len(found_lines) - 40} más")
+            lines.append("")
+
+    # Holehe — registro por email
+    if email:
+        lines += ["### Registro por email — Holehe", ""]
+        if holehe_result:
+            lines.append(holehe_result[:2000])
+        else:
+            lines.append("*Sin resultados o herramienta no disponible.*")
+        lines.append("")
+
+    lines += ["---", ""]
+
+    # Perfil psicosocial (skeleton para análisis manual)
+    lines += [
+        "## Perfil psicosocial",
+        "",
+        "> *Completar basándose en los perfiles verificados arriba.*",
+        "",
+        "**Intereses detectados:**",
+        "- [ pendiente de análisis ]",
+        "",
+        "**Estilo de comunicación observable:**",
+        "- [ pendiente de análisis ]",
+        "",
+        f"**Nivel de privacidad digital:** {privacy_level}",
+        "",
+        "---",
+        "",
+        "## Rapport — puntos de conexión",
+        "",
+        "> *Temas en común, hobbies, experiencias compartidas con el investigador.*",
+        "",
+        "- [ pendiente de análisis ]",
+        "",
+        "---",
+        "",
+        "## Advertencias",
+        "",
+        "- **Verificar identidad:** confirmar nombre/foto en cada perfil antes de atribuirlo a la persona.",
+        "- **Usernames compartidos:** el mismo username puede pertenecer a personas distintas.",
+        "- **Datos presentados, no concluidos:** el juicio de atribución queda en manos del investigador.",
+    ]
+    if tool_warnings:
+        lines += ["", "**Errores técnicos durante la búsqueda:**"]
+        for w in tool_warnings:
+            lines.append(f"- {w}")
+    lines.append("")
+
+    content = "\n".join(lines)
+
+    if save:
+        path = _save_vault(filename, content)
+        summary = "\n".join(lines[:50])
+        return (
+            f"Informe guardado en: {path}\n\n"
+            f"Plataformas encontradas (Maigret): {len(all_platforms)}\n"
+            f"Nivel de privacidad: {privacy_level}\n\n"
+            f"---\n\n{summary}\n\n[... ver informe completo en vault ...]"
+        )
+
+    return content
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Tool registry
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -798,6 +1022,42 @@ TOOLS = {
             },
             "required": ["target", "target_type"],
             "title": "osint_dossier",
+        },
+    },
+    "osint_person": {
+        "fn": tool_osint_person,
+        "description": (
+            "Generate a comprehensive OSINT profile for a specific person. "
+            "Runs Maigret (3000+ sites) + Sherlock (400+ networks) for each username hint, "
+            "and Holehe (120+ services) if an email is provided. "
+            "Output: structured Markdown with digital footprint table (privacy level), "
+            "psych profile skeleton for manual completion, and ambiguity warnings. "
+            "Saved to OSINT_VAULT. Takes 2-5 minutes per person. "
+            "IMPORTANT: every found profile must be manually verified before attribution."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Full name of the person (e.g. 'John Smith')",
+                },
+                "username_hints": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Known or suspected usernames (e.g. ['jsmith', 'john.smith'])",
+                },
+                "email": {
+                    "type": "string",
+                    "description": "Email address if known (optional)",
+                },
+                "save": {
+                    "type": "boolean",
+                    "description": "Save report to OSINT_VAULT (default true)",
+                },
+            },
+            "required": ["name"],
+            "title": "osint_person",
         },
     },
 }
