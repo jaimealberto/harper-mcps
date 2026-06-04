@@ -18,6 +18,7 @@ Available tools:
 """
 import json
 import re
+import shlex
 import subprocess
 import sys
 from datetime import date
@@ -149,7 +150,7 @@ def tool_ssh_read_file(args: dict) -> str:
     host = args["host"]
     path = args["path"]
     try:
-        rc, stdout, stderr = _ssh(host, f"cat {path}")
+        rc, stdout, stderr = _ssh(host, f"cat {shlex.quote(path)}")
         if rc != 0:
             return f"Could not read {path} on {host}: {stderr.strip()}"
         return f"# {host}:{path}\n\n{stdout}"
@@ -170,7 +171,7 @@ def tool_ssh_write_file(args: dict) -> str:
             steps.append(_auto_backup(host, path))
         import base64
         b64 = base64.b64encode(content.encode()).decode()
-        write_cmd = f"echo '{b64}' | base64 -d > {path} && echo WRITTEN"
+        write_cmd = f"echo '{b64}' | base64 -d > {shlex.quote(path)} && echo WRITTEN"
         rc, stdout, stderr = _ssh(host, write_cmd)
         if "WRITTEN" in stdout:
             steps.append(f"Written: {path} ({len(content)} bytes)")
