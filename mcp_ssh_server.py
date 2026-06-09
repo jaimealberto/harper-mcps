@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
 """
-MCP server for SSH access and nmap network scanning.
-Uses ~/.ssh/config to resolve hosts and keys — no stored passwords.
+Harper MCP — Servidor MCP para SSH a la infraestructura janet.int y ZJanet.
+Usa ~/.ssh/config para resolver hosts y claves — sin contraseñas almacenadas.
 
-MCP over stdio without FastMCP (startup <20ms).
-
-Available tools:
-  ssh_list_hosts  — list configured hosts
-  ssh_run         — run a command on a remote host
-  ssh_read_file   — read a remote file
-  ssh_write_file  — write a remote file (with auto-backup)
-  ssh_check       — test connectivity
-  ssh_check_all   — check all hosts at once
-  nmap_discover   — ping scan to find live hosts
-  nmap_scan       — port scan
-  nmap_audit      — full service audit with NSE scripts
+Implementación MCP sobre stdio sin FastMCP (arranque <20ms vs ~760ms con FastMCP).
 """
 import json
+import logging
 import re
 import shlex
+import signal
 import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+
+logging.basicConfig(
+    filename="/tmp/harper-ssh-mcp.log",
+    level=logging.ERROR,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 
 SSH_CONFIG = Path.home() / ".ssh" / "config"
 SSH_OPTS = [
@@ -34,14 +31,14 @@ SSH_OPTS = [
 IGNORE_PATHS = {"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"}
 
 WRITE_PATTERNS = [
-    r'(?<![<2])>\s*["\']?(/[^\s"\';|&]+)',
-    r'\btee\s+["\']?(/[^\s"\';|&]+)',
-    r'\bsed\s+-i\S*\s+\S+\s+(/[^\s"\';|&]+)',
-    r'\bcp\s+\S+\s+(/[^\s"\';|&]+)',
+    r'(?<![<2])>\s*["\']?(/[^\s"\';|&]+)',     # > /ruta (excluye 2>)
+    r'\btee\s+["\']?(/[^\s"\';|&]+)',            # tee /ruta
+    r'\bsed\s+-i\S*\s+\S+\s+(/[^\s"\';|&]+)',   # sed -i ... fichero
+    r'\bcp\s+\S+\s+(/[^\s"\';|&]+)',             # cp origen /destino
 ]
 
 # ─────────────────────────────────────────
-# SSH logic
+# Lógica SSH
 # ─────────────────────────────────────────
 
 def _detect_write_path(command: str):
@@ -71,9 +68,9 @@ def _auto_backup(host: str, path: str) -> str:
         if "BACKUP_OK" in out:
             return f"[backup] {host}:{backup_path}"
         elif "SKIP_NO_FILE" in out:
-            return "[backup] new file, no backup needed"
+            return "[backup] fichero nuevo, sin backup necesario"
         else:
-            return f"[backup] WARNING: no permissions to backup {host}:{path} — requires root"
+            return f"[backup] AVISO: sin permisos para backup de {host}:{path} — requiere root"
     except Exception as e:
         return f"[backup] ERROR: {e}"
 
@@ -109,12 +106,12 @@ def _fmt(rc: int, stdout: str, stderr: str) -> str:
     out = stdout.rstrip()
     err = stderr.rstrip()
     if rc == 0:
-        return out if out else "(no output)"
-    return f"ERROR (rc={rc})\n{err or out or '(no output)'}"
+        return out if out else "(sin salida)"
+    return f"ERROR (rc={rc})\n{err or out or '(sin salida)'}"
 
 
 # ─────────────────────────────────────────
-# Tool implementations
+# Implementación de tools
 # ─────────────────────────────────────────
 
 def tool_ssh_list_hosts(_args: dict) -> str:
@@ -126,7 +123,7 @@ def tool_ssh_list_hosts(_args: dict) -> str:
         port = info.get("port", "22")
         port_str = f":{port}" if port != "22" else ""
         lines.append(f"  {alias:<30} {user}@{hostname}{port_str}")
-    return f"{len(hosts)} hosts available:\n\n" + "\n".join(lines)
+    return f"{len(hosts)} hosts disponibles:\n\n" + "\n".join(lines)
 
 
 def tool_ssh_run(args: dict) -> str:
@@ -141,9 +138,9 @@ def tool_ssh_run(args: dict) -> str:
         rc, stdout, stderr = _ssh(host, command, timeout)
         return backup_note + _fmt(rc, stdout, stderr)
     except subprocess.TimeoutExpired:
-        return f"TIMEOUT ({timeout}s) — host {host} not responding or command too slow."
+        return f"TIMEOUT ({timeout}s) — host {host} no responde o comando muy lento."
     except Exception as e:
-        return f"SSH ERROR: {e}"
+        return f"ERROR SSH: {e}"
 
 
 def tool_ssh_read_file(args: dict) -> str:
@@ -152,10 +149,10 @@ def tool_ssh_read_file(args: dict) -> str:
     try:
         rc, stdout, stderr = _ssh(host, f"cat {shlex.quote(path)}")
         if rc != 0:
-            return f"Could not read {path} on {host}: {stderr.strip()}"
+            return f"No se pudo leer {path} en {host}: {stderr.strip()}"
         return f"# {host}:{path}\n\n{stdout}"
     except subprocess.TimeoutExpired:
-        return f"TIMEOUT — {host} not responding."
+        return f"TIMEOUT — {host} no responde."
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -174,12 +171,12 @@ def tool_ssh_write_file(args: dict) -> str:
         write_cmd = f"echo '{b64}' | base64 -d > {shlex.quote(path)} && echo WRITTEN"
         rc, stdout, stderr = _ssh(host, write_cmd)
         if "WRITTEN" in stdout:
-            steps.append(f"Written: {path} ({len(content)} bytes)")
+            steps.append(f"Escrito: {path} ({len(content)} bytes)")
         else:
-            steps.append(f"ERROR writing: {stderr.strip() or stdout.strip()}")
+            steps.append(f"ERROR escribiendo: {stderr.strip() or stdout.strip()}")
         return "\n".join(steps)
     except subprocess.TimeoutExpired:
-        return f"TIMEOUT — {host} not responding."
+        return f"TIMEOUT — {host} no responde."
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -189,8 +186,8 @@ def tool_ssh_check(args: dict) -> str:
     try:
         rc, stdout, stderr = _ssh(host, "echo OK && hostname && uptime", timeout=12)
         if rc == 0:
-            return f"✓ {host} reachable:\n{stdout.strip()}"
-        return f"✗ {host} not responding or access denied:\n{stderr.strip()}"
+            return f"✓ {host} accesible:\n{stdout.strip()}"
+        return f"✗ {host} no responde o acceso denegado:\n{stderr.strip()}"
     except subprocess.TimeoutExpired:
         return f"✗ {host} — TIMEOUT (12s)"
     except Exception as e:
@@ -207,17 +204,17 @@ def tool_ssh_check_all(_args: dict) -> str:
             if rc == 0:
                 results.append(f"  ✓ {alias:<30} → {hostname}")
             else:
-                results.append(f"  ✗ {alias:<30} (access denied)")
+                results.append(f"  ✗ {alias:<30} (acceso denegado)")
         except subprocess.TimeoutExpired:
             results.append(f"  ✗ {alias:<30} (timeout)")
         except Exception as e:
             results.append(f"  ✗ {alias:<30} ({e})")
     ok = sum(1 for r in results if "✓" in r)
-    return f"{ok}/{len(hosts)} hosts reachable:\n\n" + "\n".join(results)
+    return f"{ok}/{len(hosts)} hosts accesibles:\n\n" + "\n".join(results)
 
 
 # ─────────────────────────────────────────
-# nmap (runs locally)
+# Lógica nmap (local)
 # ─────────────────────────────────────────
 
 def _nmap(args: list, timeout: int = 60) -> str:
@@ -232,18 +229,20 @@ def _nmap(args: list, timeout: int = 60) -> str:
             return f"ERROR nmap (rc={result.returncode}): {err}"
         return out
     except subprocess.TimeoutExpired:
-        return f"TIMEOUT ({timeout}s) — scan took too long."
+        return f"TIMEOUT ({timeout}s) — el escaneo tardó demasiado."
     except FileNotFoundError:
-        return "ERROR: nmap is not installed on this system."
+        return "ERROR: nmap no está instalado en este sistema."
     except Exception as e:
         return f"ERROR: {e}"
 
 
 def tool_nmap_discover(args: dict) -> str:
-    """Ping scan: detect which hosts are alive in a network/subnet. Does not scan ports."""
+    """Ping scan: detecta qué hosts están activos en una red/subred. No escanea puertos."""
     network = args["network"]
     timeout = args.get("timeout", 30)
+    # -sn: solo ping, no puertos | -T4: agresivo (LAN) | --reason: mostrar método
     result = _nmap(["-sn", "-T4", "--reason", network], timeout=timeout)
+    # Extraer resumen de hosts activos
     lines = result.splitlines()
     active = [l for l in lines if "Nmap scan report" in l or "Host is up" in l or "MAC Address" in l]
     summary_line = next((l for l in lines if "Nmap done" in l), "")
@@ -253,14 +252,14 @@ def tool_nmap_discover(args: dict) -> str:
 
 
 def tool_nmap_scan(args: dict) -> str:
-    """Port scan on one or more hosts/IPs."""
+    """Escaneo de puertos en uno o varios hosts/IPs."""
     target = args["target"]
-    ports = args.get("ports", "")
-    flags = args.get("flags", "")
+    ports = args.get("ports", "")       # ej: "22,80,443" o "-" para todos o vacío (top 1000)
+    flags = args.get("flags", "")       # flags extra: "-sV", "-sU", etc.
     only_open = args.get("only_open", True)
     timeout = args.get("timeout", 60)
 
-    cmd = ["-sT", "-T4"]
+    cmd = ["-sT", "-T4"]                # TCP connect, no requiere root
     if only_open:
         cmd += ["--open"]
     if ports == "-":
@@ -275,11 +274,12 @@ def tool_nmap_scan(args: dict) -> str:
 
 
 def tool_nmap_audit(args: dict) -> str:
-    """Full host audit: service versions + default NSE scripts."""
+    """Auditoría completa de un host: versiones de servicios + scripts NSE por defecto."""
     host = args["host"]
-    ports = args.get("ports", "")
+    ports = args.get("ports", "")       # opcional: limitar a puertos concretos
     timeout = args.get("timeout", 120)
 
+    # -sT: TCP connect (sin root) | -sV: versiones | -sC: scripts default | --open: solo abiertos
     cmd = ["-sT", "-sV", "-sC", "--open", "-T4"]
     if ports:
         cmd += ["-p", ports]
@@ -291,7 +291,7 @@ def tool_nmap_audit(args: dict) -> str:
 TOOLS = {
     "ssh_list_hosts": {
         "fn": tool_ssh_list_hosts,
-        "description": "List all hosts available in ~/.ssh/config with their IP and user.",
+        "description": "Lista todos los hosts disponibles en ~/.ssh/config con su IP y usuario.",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -301,16 +301,16 @@ TOOLS = {
     "ssh_run": {
         "fn": tool_ssh_run,
         "description": (
-            "Run a command on a remote host via SSH. "
-            "Uses aliases from ~/.ssh/config. "
-            "If a file write is detected, automatically creates a backup before executing."
+            "Ejecuta un comando en un host remoto vía SSH. "
+            "Usa los alias de ~/.ssh/config — ej: 'r2d2.janet.int', 'zvision', 'zhomer'. "
+            "Si detecta escritura de fichero, hace backup automático antes de ejecutar."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "host":    {"type": "string", "description": "SSH host alias"},
-                "command": {"type": "string", "description": "Command to execute"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds (default 30)"},
+                "host":    {"type": "string", "description": "Alias SSH del host"},
+                "command": {"type": "string", "description": "Comando a ejecutar"},
+                "timeout": {"type": "integer", "description": "Timeout en segundos (default 30)"},
             },
             "required": ["host", "command"],
             "title": "ssh_run",
@@ -318,7 +318,7 @@ TOOLS = {
     },
     "ssh_read_file": {
         "fn": tool_ssh_read_file,
-        "description": "Read the contents of a file on a remote host. Equivalent to: ssh host 'cat path'",
+        "description": "Lee el contenido de un fichero en un host remoto. Equivale a: ssh host 'cat path'",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -332,8 +332,8 @@ TOOLS = {
     "ssh_write_file": {
         "fn": tool_ssh_write_file,
         "description": (
-            "Write content to a file on a remote host. "
-            "With backup=True (default) creates file.harper.YYYY-MM-DD before overwriting."
+            "Escribe contenido en un fichero de un host remoto. "
+            "Con backup=True (por defecto) hace cp fichero.harper.YYYY-MM-DD antes de sobreescribir."
         ),
         "inputSchema": {
             "type": "object",
@@ -341,7 +341,7 @@ TOOLS = {
                 "host":    {"type": "string"},
                 "path":    {"type": "string"},
                 "content": {"type": "string"},
-                "backup":  {"type": "boolean", "description": "Create backup first (default true)"},
+                "backup":  {"type": "boolean", "description": "Hacer backup antes (default true)"},
             },
             "required": ["host", "path", "content"],
             "title": "ssh_write_file",
@@ -349,7 +349,7 @@ TOOLS = {
     },
     "ssh_check": {
         "fn": tool_ssh_check,
-        "description": "Check if a host is reachable via SSH. Returns hostname, uptime and remote user.",
+        "description": "Comprueba si un host está accesible vía SSH. Devuelve hostname, uptime y usuario remoto.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -361,7 +361,7 @@ TOOLS = {
     },
     "ssh_check_all": {
         "fn": tool_ssh_check_all,
-        "description": "Check SSH connectivity for all hosts in ~/.ssh/config.",
+        "description": "Comprueba conectividad SSH en todos los hosts de ~/.ssh/config.",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -371,15 +371,15 @@ TOOLS = {
     "nmap_discover": {
         "fn": tool_nmap_discover,
         "description": (
-            "Ping scan: detect which hosts are alive in a network or subnet. "
-            "Does not scan ports — only answers 'who is up?'. "
-            "Example networks: '192.168.1.0/24', '10.0.0.0/8'."
+            "Ping scan: detecta qué hosts están activos en una red o subred. "
+            "No escanea puertos — solo responde '¿quién está vivo?'. "
+            "Ejemplos de network: '172.16.0.0/27', '172.16.1.0/27', '10.0.34.0/27', '172.16.3.0/27'."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "network": {"type": "string", "description": "Network in CIDR, range or IP (e.g. 192.168.1.0/24)"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds (default 30)"},
+                "network": {"type": "string", "description": "Red en CIDR, rango o IP (ej: 172.16.1.0/27)"},
+                "timeout": {"type": "integer", "description": "Timeout en segundos (default 30)"},
             },
             "required": ["network"],
             "title": "nmap_discover",
@@ -388,19 +388,19 @@ TOOLS = {
     "nmap_scan": {
         "fn": tool_nmap_scan,
         "description": (
-            "Scan ports on one or more hosts. "
-            "By default scans top 1000 most common ports and shows only open ones. "
-            "Use ports='-' for all ports, ports='22,80,443' for specific ports. "
-            "Use flags='-sV' to detect service versions."
+            "Escanea puertos en uno o varios hosts. "
+            "Por defecto escanea los 1000 puertos más comunes y muestra solo los abiertos. "
+            "Usar ports='-' para todos los puertos, ports='22,80,443' para puertos concretos. "
+            "Usar flags='-sV' para detectar versiones de servicios."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "target":    {"type": "string", "description": "IP, hostname, CIDR or range"},
-                "ports":     {"type": "string", "description": "Ports: '22,80,443' | '-' (all) | '' (top 1000 default)"},
-                "flags":     {"type": "string", "description": "Extra nmap flags, e.g. '-sV' for versions, '-sU' for UDP"},
-                "only_open": {"type": "boolean", "description": "Show only open ports (default true)"},
-                "timeout":   {"type": "integer", "description": "Timeout in seconds (default 60)"},
+                "target":    {"type": "string", "description": "IP, hostname, CIDR o rango (ej: r2d2.janet.int, 172.16.1.0/27)"},
+                "ports":     {"type": "string", "description": "Puertos: '22,80,443' | '-' (todos) | '' (top 1000 default)"},
+                "flags":     {"type": "string", "description": "Flags nmap extra, ej: '-sV' para versiones, '-sU' para UDP"},
+                "only_open": {"type": "boolean", "description": "Mostrar solo puertos abiertos (default true)"},
+                "timeout":   {"type": "integer", "description": "Timeout en segundos (default 60)"},
             },
             "required": ["target"],
             "title": "nmap_scan",
@@ -409,16 +409,15 @@ TOOLS = {
     "nmap_audit": {
         "fn": tool_nmap_audit,
         "description": (
-            "Full host audit: service versions + default NSE scripts. "
-            "More thorough than nmap_scan — takes longer but gives detailed info "
-            "(banners, auth, HTTP titles, etc.)."
+            "Auditoría completa de un host: versiones de servicios + scripts NSE por defecto. "
+            "Más profundo que nmap_scan — tarda más pero da info detallada (banner, auth, título HTTP, etc.)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "host":    {"type": "string", "description": "Host to audit (SSH alias or IP)"},
-                "ports":   {"type": "string", "description": "Optional: limit to specific ports (e.g. '22,80,443')"},
-                "timeout": {"type": "integer", "description": "Timeout in seconds (default 120)"},
+                "host":    {"type": "string", "description": "Host a auditar (alias SSH o IP)"},
+                "ports":   {"type": "string", "description": "Opcional: limitar a puertos concretos (ej: '22,80,443')"},
+                "timeout": {"type": "integer", "description": "Timeout en segundos (default 120)"},
             },
             "required": ["host"],
             "title": "nmap_audit",
@@ -427,12 +426,18 @@ TOOLS = {
 }
 
 # ─────────────────────────────────────────
-# MCP stdio loop
+# Loop MCP sobre stdio
 # ─────────────────────────────────────────
 
 def _send(obj: dict):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        sys.exit(0)
+    except Exception as e:
+        logging.error(f"_send error: {e}")
+        sys.exit(1)
 
 
 def _handle(msg: dict):
@@ -450,7 +455,7 @@ def _handle(msg: dict):
         })
 
     elif method == "notifications/initialized":
-        pass
+        pass  # notificación, sin respuesta
 
     elif method == "tools/list":
         tools_list = [
@@ -476,7 +481,7 @@ def _handle(msg: dict):
         try:
             result_text = TOOLS[tool_name]["fn"](arguments)
         except Exception as e:
-            result_text = f"Internal ERROR: {e}"
+            result_text = f"ERROR interno: {e}"
         _send({
             "jsonrpc": "2.0", "id": msg_id,
             "result": {"content": [{"type": "text", "text": result_text}]},
@@ -490,6 +495,7 @@ def _handle(msg: dict):
 
 
 def main():
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
         if not raw_line:
@@ -498,7 +504,10 @@ def main():
             msg = json.loads(raw_line)
         except json.JSONDecodeError:
             continue
-        _handle(msg)
+        try:
+            _handle(msg)
+        except Exception as e:
+            logging.error(f"_handle error: {e}")
 
 
 if __name__ == "__main__":
