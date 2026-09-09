@@ -7,6 +7,7 @@ Implementación MCP sobre stdio sin FastMCP (arranque <20ms vs ~760ms con FastMC
 """
 import json
 import logging
+import os
 import re
 import shlex
 import signal
@@ -94,12 +95,32 @@ def _parse_ssh_hosts() -> dict:
     return hosts
 
 
+MAX_TIMEOUT = 60  # tope duro — evita esperas tan largas que el cliente MCP dé la sesión por muerta
+
+
 def _ssh(host: str, command: str, timeout: int = 30):
-    result = subprocess.run(
+    timeout = min(timeout, MAX_TIMEOUT)
+    proc = subprocess.Popen(
         ["ssh"] + SSH_OPTS + [host, command],
-        capture_output=True, text=True, timeout=timeout
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,  # grupo de proceso propio, para poder matarlo entero si se cuelga
     )
-    return result.returncode, result.stdout, result.stderr
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stdout, stderr
+    except subprocess.TimeoutExpired:
+        logging.error(
+            f"TIMEOUT tras {timeout}s — host={host!r} command={command[:200]!r} — matando grupo de proceso"
+        )
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logging.error(f"proceso {proc.pid} (host={host!r}) no murió tras SIGKILL a su grupo")
+        raise
 
 
 def _fmt(rc: int, stdout: str, stderr: str) -> str:
