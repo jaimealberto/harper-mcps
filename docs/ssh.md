@@ -221,3 +221,10 @@ nmap_audit(host="servidor01", ports="22,80,443")
 - Para escaneos UDP (`-sU`) o SYN scan (`-sS`) sí se necesita root: ejecuta Claude Code como root o con sudo.
 - El timeout de `ssh_run` por defecto es 30s. Para comandos lentos (compilaciones, operaciones de backup) auméntalo: `timeout=300`.
 - Los alias `*` y `github.com` se excluyen automáticamente de `ssh_list_hosts` y `ssh_check_all`.
+- `~/.ssh/config` puede declarar varios alias en la misma línea (`Host corto largo.dominio.com`) — todos se registran y funcionan indistintamente.
+
+## Fiabilidad — servidor asíncrono
+
+El servidor procesa las llamadas `tools/call` en un `ThreadPoolExecutor` sobre un bucle `asyncio`, no de forma síncrona. Esto soluciona un problema real: si una llamada se queda colgada (por ejemplo un comando remoto que espera un prompt interactivo, como `su` sin forma de pasarle la contraseña) ya no bloquea el único hilo del servidor — el cliente MCP dejaba de recibir respuesta y acababa desconectando la sesión, aunque el proceso siguiera vivo. Ahora cada llamada corre en su propio hilo y las respuestas rápidas (`ssh_check`, `ssh_list_hosts`...) no esperan a que termine una lenta.
+
+Si necesitas ejecutar algo que requiera un prompt interactivo (como `su -`), pásale la contraseña por otra vía (variable de entorno, fichero, `sshpass`) en vez de depender de que el comando la pida por stdin — el tool no tiene TTY.

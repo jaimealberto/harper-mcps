@@ -134,6 +134,7 @@ Lee la configuración de hosts desde `~/.ssh/config` — sin contraseñas almace
 - Backup automático antes de escribir ficheros (crea `fichero.harper.YYYY-MM-DD`)
 - Detecta operaciones de escritura en el comando y hace backup del fichero destino
 - Ping scan, escaneo de puertos y auditoría completa de servicios con nmap
+- Servidor asíncrono (`asyncio` + `ThreadPoolExecutor`): una llamada lenta o colgada no bloquea el resto — varias `tools/call` en paralelo se resuelven de verdad en paralelo
 
 **Herramientas disponibles:**
 

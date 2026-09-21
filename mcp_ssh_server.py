@@ -5,6 +5,7 @@ Usa ~/.ssh/config para resolver hosts y claves — sin contraseñas almacenadas.
 
 Implementación MCP sobre stdio sin FastMCP (arranque <20ms vs ~760ms con FastMCP).
 """
+import asyncio
 import json
 import logging
 import os
@@ -13,6 +14,8 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 
@@ -83,15 +86,16 @@ def _parse_ssh_hosts() -> dict:
     for line in SSH_CONFIG.read_text().splitlines():
         line = line.strip()
         if line.startswith("Host "):
-            alias = line[5:].strip()
-            if alias not in skip:
-                current = alias
-                hosts[current] = {}
+            aliases = [a for a in line[5:].split() if a not in skip]
+            if aliases:
+                current = {}
+                for alias in aliases:
+                    hosts[alias] = current
             else:
                 current = None
-        elif current and "=" not in line and " " in line:
+        elif current is not None and "=" not in line and " " in line:
             key, _, val = line.partition(" ")
-            hosts[current][key.lower()] = val.strip()
+            current[key.lower()] = val.strip()
     return hosts
 
 
@@ -449,19 +453,34 @@ TOOLS = {
 # ─────────────────────────────────────────
 # Loop MCP sobre stdio
 # ─────────────────────────────────────────
+#
+# 2026-09-14: reescrito de bucle síncrono a asyncio + ThreadPoolExecutor.
+# Causa raíz del bug anterior: el bucle leía stdin y ejecutaba cada tools/call
+# de forma bloqueante, uno detrás de otro. Una sola llamada lenta (p.ej. un
+# ssh_run que se queda colgado, como un `su -c` sin contraseña disponible)
+# bloqueaba TODO el servidor — incluidas llamadas en paralelo rápidas — el
+# tiempo suficiente para que el cliente MCP diera la sesión por muerta y la
+# desconectara, aunque el proceso siguiera vivo y hubiera respondido al final.
+# Ahora cada tools/call corre en un hilo del executor: el bucle de lectura de
+# stdin nunca se bloquea y varias llamadas pueden resolverse en paralelo de
+# verdad. Rollback: cp mcp_ssh_server.py.harper.2026-09-14 mcp_ssh_server.py
+
+_send_lock = threading.Lock()
 
 def _send(obj: dict):
     try:
-        sys.stdout.write(json.dumps(obj) + "\n")
-        sys.stdout.flush()
+        line = json.dumps(obj) + "\n"
+        with _send_lock:
+            sys.stdout.write(line)
+            sys.stdout.flush()
     except BrokenPipeError:
-        sys.exit(0)
+        os._exit(0)
     except Exception as e:
         logging.error(f"_send error: {e}")
-        sys.exit(1)
 
 
-def _handle(msg: dict):
+def _handle_fast(msg: dict):
+    """Métodos que responden al instante — se procesan en el hilo principal."""
     method = msg.get("method", "")
     msg_id = msg.get("id")
 
@@ -489,25 +508,6 @@ def _handle(msg: dict):
         ]
         _send({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools_list}})
 
-    elif method == "tools/call":
-        params = msg.get("params", {})
-        tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
-        if tool_name not in TOOLS:
-            _send({
-                "jsonrpc": "2.0", "id": msg_id,
-                "error": {"code": -32601, "message": f"Tool not found: {tool_name}"},
-            })
-            return
-        try:
-            result_text = TOOLS[tool_name]["fn"](arguments)
-        except Exception as e:
-            result_text = f"ERROR interno: {e}"
-        _send({
-            "jsonrpc": "2.0", "id": msg_id,
-            "result": {"content": [{"type": "text", "text": result_text}]},
-        })
-
     elif msg_id is not None:
         _send({
             "jsonrpc": "2.0", "id": msg_id,
@@ -515,21 +515,66 @@ def _handle(msg: dict):
         })
 
 
-def main():
+def _run_tool_call(msg: dict):
+    """Ejecuta una tools/call — corre en un hilo del executor, puede bloquear sin problema."""
+    params = msg.get("params", {})
+    msg_id = msg.get("id")
+    tool_name = params.get("name", "")
+    arguments = params.get("arguments", {})
+    if tool_name not in TOOLS:
+        _send({
+            "jsonrpc": "2.0", "id": msg_id,
+            "error": {"code": -32601, "message": f"Tool not found: {tool_name}"},
+        })
+        return
+    try:
+        result_text = TOOLS[tool_name]["fn"](arguments)
+    except Exception as e:
+        result_text = f"ERROR interno: {e}"
+    _send({
+        "jsonrpc": "2.0", "id": msg_id,
+        "result": {"content": [{"type": "text", "text": result_text}]},
+    })
+
+
+EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="mcp-tool")
+
+
+async def main():
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-    for raw_line in sys.stdin:
-        raw_line = raw_line.strip()
+    loop = asyncio.get_event_loop()
+
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+    pending = set()
+    while True:
+        raw = await reader.readline()
+        if not raw:
+            break
+        raw_line = raw.decode(errors="replace").strip()
         if not raw_line:
             continue
         try:
             msg = json.loads(raw_line)
         except json.JSONDecodeError:
             continue
-        try:
-            _handle(msg)
-        except Exception as e:
-            logging.error(f"_handle error: {e}")
+
+        if msg.get("method") == "tools/call":
+            # se lanza en un hilo aparte y no bloquea el bucle de lectura
+            task = loop.run_in_executor(EXECUTOR, _run_tool_call, msg)
+            pending.add(task)
+            task.add_done_callback(lambda t: pending.discard(t))
+        else:
+            try:
+                _handle_fast(msg)
+            except Exception as e:
+                logging.error(f"_handle_fast error: {e}")
+
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -114,6 +114,7 @@ Reads host configuration from `~/.ssh/config` — no credentials stored anywhere
 - Auto-backup before writing files (creates `file.harper.YYYY-MM-DD`)
 - Detects write operations and backs up the target file automatically
 - nmap ping scan, port scan and full service audit
+- Async server (`asyncio` + `ThreadPoolExecutor`): one slow or hung call doesn't block the rest — parallel `tools/call` requests actually resolve in parallel
 
 **Example usage:**
 - "List my SSH hosts"
